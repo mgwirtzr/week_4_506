@@ -1,7 +1,7 @@
 // Save-and-Publish Draft Editor
 //
-// This app has a known race condition between /draft and /publish.
-// See README.md for the bug description and what you're being asked to do.
+// POST /publish awaits draftCommitGate so deferred POST /draft commits finish
+// before currentDraft is read (see README.md).
 
 const express = require('express');
 const path = require('path');
@@ -44,6 +44,11 @@ let publishedDraft = '';
 // Tests may override this via environment variable.
 const SAVE_COMMIT_DELAY_MS = parseInt(process.env.SAVE_COMMIT_DELAY_MS || '200', 10);
 
+// Serialized completion barrier for deferred draft commits. Each successful POST /draft
+// extends this chain until its SAVE_COMMIT_DELAY_MS commit finishes. POST /publish
+// awaits it so publish never reads currentDraft while an earlier save is still committing.
+let draftCommitGate = Promise.resolve();
+
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
@@ -66,7 +71,7 @@ app.post('/draft', (req, res) => {
     validationOk: typeof content === 'string',
     note:
       typeof content === 'string'
-        ? 'Draft commit is deferred; /publish can observe stale committedDraftBefore until EXIT fires.'
+        ? 'Draft commit is deferred; POST /publish awaits draftCommitGate before reading so commits are not skipped.'
         : undefined,
   });
 
@@ -81,51 +86,70 @@ app.post('/draft', (req, res) => {
     return res.status(400).json({ error: 'content must be a string' });
   }
 
-  // Simulate write latency so /publish can interleave before commit completes.
+  let resolveCommit;
+  const commitFinished = new Promise((resolve) => {
+    resolveCommit = resolve;
+  });
+
+  const prevGate = draftCommitGate;
+  draftCommitGate = prevGate.then(() => commitFinished);
+
+  // Simulate write latency (DB/network). Gate stays pending until this fires.
   setTimeout(() => {
-    currentDraft = content;
-    logHandlerEvent({
-      phase: 'EXIT',
-      reqId,
-      requestType: 'POST /draft',
-      draftContentSaved: content,
-      committedDraftAfter: currentDraft,
-      note: 'Commit finished; currentDraft now matches draftContentSaved.',
-    });
-    res.json({ ok: true, saved: content, reqId });
+    try {
+      currentDraft = content;
+      logHandlerEvent({
+        phase: 'EXIT',
+        reqId,
+        requestType: 'POST /draft',
+        draftContentSaved: content,
+        committedDraftAfter: currentDraft,
+        note: 'Commit finished; currentDraft now matches draftContentSaved.',
+      });
+      res.json({ ok: true, saved: content, reqId });
+    } finally {
+      resolveCommit();
+    }
   }, SAVE_COMMIT_DELAY_MS);
 });
 
 // POST /publish — mark the most recent saved draft as live.
 //
-// THE BUG: this reads currentDraft *immediately*. If a /draft request is
-// in flight (its timeout hasn't fired), publishedDraft will be set to the
-// older saved value, not the in-flight one.
-app.post('/publish', (req, res) => {
+// Waits for draftCommitGate so any in-flight POST /draft commits finish before
+// reading currentDraft (eliminates save/publish races).
+app.post('/publish', async (req, res, next) => {
   const reqId = randomUUID();
-  const committedDraftAtRead = currentDraft;
-  logHandlerEvent({
-    phase: 'ENTRY',
-    reqId,
-    requestType: 'POST /publish',
-    committedDraftAtRead,
-    note:
-      'Reads currentDraft immediately. If a /draft EXIT has not run yet, this value may lag behind draftContentSaving from an overlapping save.',
-  });
+  try {
+    const currentDraftBeforeAwaitingCommits = currentDraft;
+    logHandlerEvent({
+      phase: 'ENTRY',
+      reqId,
+      requestType: 'POST /publish',
+      currentDraftBeforeAwaitingCommits,
+      note:
+        'Will await draftCommitGate so pending deferred commits complete before reading currentDraft.',
+    });
 
-  publishedDraft = committedDraftAtRead;
+    await draftCommitGate;
 
-  logHandlerEvent({
-    phase: 'EXIT',
-    reqId,
-    requestType: 'POST /publish',
-    publishedDraft,
-    committedDraftAtRead,
-    note:
-      'If POST /draft EXIT for newer content appears after this ENTRY, publish still used committedDraftAtRead — stale publish.',
-  });
+    const committedDraftAtRead = currentDraft;
+    publishedDraft = committedDraftAtRead;
 
-  res.json({ ok: true, published: publishedDraft, reqId });
+    logHandlerEvent({
+      phase: 'EXIT',
+      reqId,
+      requestType: 'POST /publish',
+      publishedDraft,
+      committedDraftAtRead,
+      currentDraftBeforeAwaitingCommits,
+      note:
+        'Published committedDraftAtRead after all pending draft commits at publish time had finished.',
+    });
+
+    res.json({ ok: true, published: publishedDraft, reqId });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // GET /published — return the currently published draft.
@@ -139,10 +163,16 @@ app.get('/current', (req, res) => {
 });
 
 // Reset endpoint for tests.
-app.post('/reset', (req, res) => {
-  currentDraft = '';
-  publishedDraft = '';
-  res.json({ ok: true });
+app.post('/reset', async (req, res, next) => {
+  try {
+    await draftCommitGate;
+    currentDraft = '';
+    publishedDraft = '';
+    draftCommitGate = Promise.resolve();
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // ---------------------------------------------------------------------------
