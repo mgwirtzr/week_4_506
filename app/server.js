@@ -5,8 +5,23 @@
 
 const express = require('express');
 const path = require('path');
+const { randomUUID } = require('crypto');
+const { performance } = require('node:perf_hooks');
 
 const app = express();
+
+/** Wall-clock ISO timestamp with microsecond fractional seconds (via performance.timeOrigin). */
+function isoTimestampHiRes() {
+  const t = performance.timeOrigin + performance.now();
+  const sec = Math.floor(t / 1000);
+  const fracSec = (t - sec * 1000) / 1000;
+  const fracDigits = fracSec.toFixed(6).slice(2);
+  return `${new Date(sec * 1000).toISOString().slice(0, -5)}.${fracDigits}Z`;
+}
+
+function logHandlerEvent(payload) {
+  console.log(JSON.stringify({ ts: isoTimestampHiRes(), ...payload }));
+}
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'static')));
 
@@ -38,15 +53,46 @@ const SAVE_COMMIT_DELAY_MS = parseInt(process.env.SAVE_COMMIT_DELAY_MS || '200',
 // Note the artificial delay: the draft is not committed to currentDraft
 // until SAVE_COMMIT_DELAY_MS milliseconds after the request arrives.
 app.post('/draft', (req, res) => {
+  const reqId = randomUUID();
   const { content } = req.body;
+
+  logHandlerEvent({
+    phase: 'ENTRY',
+    reqId,
+    requestType: 'POST /draft',
+    draftContentSaving: typeof content === 'string' ? content : null,
+    committedDraftBefore: currentDraft,
+    commitDelayMs: SAVE_COMMIT_DELAY_MS,
+    validationOk: typeof content === 'string',
+    note:
+      typeof content === 'string'
+        ? 'Draft commit is deferred; /publish can observe stale committedDraftBefore until EXIT fires.'
+        : undefined,
+  });
+
   if (typeof content !== 'string') {
+    logHandlerEvent({
+      phase: 'EXIT',
+      reqId,
+      requestType: 'POST /draft',
+      error: 'validation_failed',
+      detail: 'content must be a string',
+    });
     return res.status(400).json({ error: 'content must be a string' });
   }
 
-  // Simulate write latency.
+  // Simulate write latency so /publish can interleave before commit completes.
   setTimeout(() => {
     currentDraft = content;
-    res.json({ ok: true, saved: content });
+    logHandlerEvent({
+      phase: 'EXIT',
+      reqId,
+      requestType: 'POST /draft',
+      draftContentSaved: content,
+      committedDraftAfter: currentDraft,
+      note: 'Commit finished; currentDraft now matches draftContentSaved.',
+    });
+    res.json({ ok: true, saved: content, reqId });
   }, SAVE_COMMIT_DELAY_MS);
 });
 
@@ -56,8 +102,30 @@ app.post('/draft', (req, res) => {
 // in flight (its timeout hasn't fired), publishedDraft will be set to the
 // older saved value, not the in-flight one.
 app.post('/publish', (req, res) => {
-  publishedDraft = currentDraft;
-  res.json({ ok: true, published: publishedDraft });
+  const reqId = randomUUID();
+  const committedDraftAtRead = currentDraft;
+  logHandlerEvent({
+    phase: 'ENTRY',
+    reqId,
+    requestType: 'POST /publish',
+    committedDraftAtRead,
+    note:
+      'Reads currentDraft immediately. If a /draft EXIT has not run yet, this value may lag behind draftContentSaving from an overlapping save.',
+  });
+
+  publishedDraft = committedDraftAtRead;
+
+  logHandlerEvent({
+    phase: 'EXIT',
+    reqId,
+    requestType: 'POST /publish',
+    publishedDraft,
+    committedDraftAtRead,
+    note:
+      'If POST /draft EXIT for newer content appears after this ENTRY, publish still used committedDraftAtRead — stale publish.',
+  });
+
+  res.json({ ok: true, published: publishedDraft, reqId });
 });
 
 // GET /published — return the currently published draft.
