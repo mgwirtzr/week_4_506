@@ -1,0 +1,23 @@
+ubuntu@ip-172-31-10-241:~/week_4_506$ npm run harness:race
+
+> week4-debug-assignment@1.0.0 harness:race
+> node harness/race_test.js
+
+{"ts":"2026-05-06T04:28:57.526228Z","side":"CLIENT","phase":"SETUP","msg":"Spawning server","SAVE_COMMIT_DELAY_MS":"250","PORT":"3459"}
+[server stdout] Draft editor running on http://localhost:3459
+[server stdout] SAVE_COMMIT_DELAY_MS = 250
+{"ts":"2026-05-06T04:28:57.789640Z","side":"CLIENT","phase":"SETUP","msg":"State reset"}
+[server stdout] {"ts":"2026-05-06T04:28:57.810493Z","phase":"ENTRY","reqId":"7bbc0267-1241-4dcf-b94e-bbba654be2e1","requestType":"POST /draft","draftContentSaving":"draft A","committedDraftBefore":"","commitDelayMs":250,"validationOk":true,"note":"Draft commit is deferred; /publish can observe stale committedDraftBefore until EXIT fires."}
+[server stdout] {"ts":"2026-05-06T04:28:58.061305Z","phase":"EXIT","reqId":"7bbc0267-1241-4dcf-b94e-bbba654be2e1","requestType":"POST /draft","draftContentSaved":"draft A","committedDraftAfter":"draft A","note":"Commit finished; currentDraft now matches draftContentSaved."}
+{"ts":"2026-05-06T04:28:58.068501Z","side":"CLIENT","phase":"SETUP","msg":"Committed draft A","currentResponse":{"current":"draft A"}}
+{"ts":"2026-05-06T04:28:58.069330Z","side":"CLIENT","phase":"RACE_START","msg":"Firing POST /draft (draft B) without awaiting; then POST /publish immediately","draftB":"draft B","expectedIfStale":"draft A","expectedIfFixed":"draft B"}
+{"ts":"2026-05-06T04:28:58.069798Z","side":"CLIENT","phase":"ENTRY","requestTag":"POST /draft content=draft B"}
+{"ts":"2026-05-06T04:28:58.071382Z","side":"CLIENT","phase":"ENTRY","requestTag":"POST /publish"}
+[server stdout] {"ts":"2026-05-06T04:28:58.074619Z","phase":"ENTRY","reqId":"658da977-d3c0-4a0f-a400-14a4a3dfd3a4","requestType":"POST /draft","draftContentSaving":"draft B","committedDraftBefore":"draft A","commitDelayMs":250,"validationOk":true,"note":"Draft commit is deferred; /publish can observe stale committedDraftBefore until EXIT fires."}
+[server stdout] {"ts":"2026-05-06T04:28:58.079041Z","phase":"ENTRY","reqId":"e3f8480f-cbd7-4c7e-bd3e-47178ac83a5d","requestType":"POST /publish","committedDraftAtRead":"draft A","note":"Reads currentDraft immediately. If a /draft EXIT has not run yet, this value may lag behind draftContentSaving from an overlapping save."}
+[server stdout] {"ts":"2026-05-06T04:28:58.079857Z","phase":"EXIT","reqId":"e3f8480f-cbd7-4c7e-bd3e-47178ac83a5d","requestType":"POST /publish","publishedDraft":"draft A","committedDraftAtRead":"draft A","note":"If POST /draft EXIT for newer content appears after this ENTRY, publish still used committedDraftAtRead — stale publish."}
+{"ts":"2026-05-06T04:28:58.082050Z","side":"CLIENT","phase":"EXIT","requestTag":"POST /publish","httpStatus":200,"body":{"ok":true,"published":"draft A","reqId":"e3f8480f-cbd7-4c7e-bd3e-47178ac83a5d"},"stalePublish":"YES — publish committed draft A while draft B save was still in flight"}
+[server stdout] {"ts":"2026-05-06T04:28:58.327230Z","phase":"EXIT","reqId":"658da977-d3c0-4a0f-a400-14a4a3dfd3a4","requestType":"POST /draft","draftContentSaved":"draft B","committedDraftAfter":"draft B","note":"Commit finished; currentDraft now matches draftContentSaved."}
+{"ts":"2026-05-06T04:28:58.328526Z","side":"CLIENT","phase":"EXIT","requestTag":"POST /draft content=draft B","httpStatus":200,"body":{"ok":true,"saved":"draft B","reqId":"658da977-d3c0-4a0f-a400-14a4a3dfd3a4"}}
+{"ts":"2026-05-06T04:28:58.328702Z","side":"CLIENT","phase":"RACE_SUMMARY","msg":"Both requests finished","draftBResponseSaved":"draft B","publishReturned":"draft A","interpretation":"Publish saw draft A — stale vs in-flight draft B (compare CLIENT ENTRY/EXIT order with server logs)."}
+{"ts":"2026-05-06T04:28:58.334302Z","side":"CLIENT","phase":"POST_RACE_STATE","GET_current":{"current":"draft B"},"GET_published":{"published":"draft A"}}
